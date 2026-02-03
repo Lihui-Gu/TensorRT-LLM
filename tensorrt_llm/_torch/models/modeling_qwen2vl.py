@@ -508,6 +508,7 @@ class Qwen2_5_VLVisionAttention(Attention):
                  reduce_output: bool = True) -> None:
 
         config = model_config.pretrained_config.vision_config
+        self.attn_type = "vision_attn"
         super().__init__(
             hidden_size=config.hidden_size,
             num_attention_heads=config.num_heads,
@@ -518,6 +519,7 @@ class Qwen2_5_VLVisionAttention(Attention):
             pos_embd_params=None,
             rope_fusion=False,
             layer_idx=layer_idx,
+            attn_type="vision_attn",
             dtype=config.torch_dtype,
             config=model_config,
             reduce_output=reduce_output,

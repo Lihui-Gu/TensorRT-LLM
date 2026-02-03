@@ -2659,7 +2659,7 @@ class PyTorchModelEngine(ModelEngine):
         if attn_metadata.padded_num_tokens is not None:
             self.input_ids_cuda[total_num_tokens:padded_num_tokens].fill_(0)
             virtual_num_tokens = padded_num_tokens
-            if self.use_mrope and mrope_position_ids:
+            if self.use_mrope and mrope_position_ids is not None:
                 self.mrope_position_ids_cuda[
                     total_num_tokens:padded_num_tokens].fill_(0)
                 final_position_ids = self.mrope_position_ids_cuda[:, :, :

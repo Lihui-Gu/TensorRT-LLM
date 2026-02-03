@@ -163,7 +163,7 @@ class QKNormRoPEAttention(Attention):
         rope_fusion: bool = True,
     ):
         self.pretrained_config = config.pretrained_config
-
+        self.attn_type = "attn"
         self.fuse_qk_norm_rope = fuse_qk_norm_rope
         self.skip_rope = skip_rope
         if use_gemma_rms_norm:
@@ -186,6 +186,7 @@ class QKNormRoPEAttention(Attention):
             pos_embd_params=pos_embd_params,
             rope_fusion=rope_fusion,
             layer_idx=layer_idx,
+            attn_type="attn",
             dtype=dtype,
             dense_bias=dense_bias,
             config=config,
