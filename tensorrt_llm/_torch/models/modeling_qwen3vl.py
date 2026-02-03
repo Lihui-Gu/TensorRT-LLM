@@ -305,7 +305,6 @@ class Qwen3VLInputProcessorBase(BaseMultimodalInputProcessor, BaseMultimodalDumm
 
         return mrope_config
 
-    @nvtx_range("Qwen3VLInputProcessorBase forward()")
     @torch.inference_mode()
     def __call__(
         self,
@@ -317,8 +316,7 @@ class Qwen3VLInputProcessorBase(BaseMultimodalInputProcessor, BaseMultimodalDumm
             inputs.get("multi_modal_data", {}),
             inputs.get("mm_processor_kwargs", {}),
         )
-        with nvtx_range_debug("transformers input preprocess"):
-            processed_inputs = self._preprocess(text_prompt, mm_data, mm_processor_kwargs)
+        processed_inputs = self._preprocess(text_prompt, mm_data, mm_processor_kwargs)
 
         multimodal_data = {}
         pixel_values = processed_inputs.get("pixel_values", None)
@@ -739,9 +737,11 @@ class Qwen3VisionModel(torch.nn.Module):
 
         # Getting positional embedding
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
+        pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
 
         # From this point, pure GPU operation
         hidden_states = self.patch_embed(pixel_values)
+        hidden_states = hidden_states + pos_embeds
         seq_len, _ = hidden_states.size()
         hidden_states = hidden_states.reshape(seq_len, -1)
 
@@ -868,6 +868,7 @@ class Qwen3VisionModelBase(nn.Module):
         return mm_content_dict, mm_extra_data
 
     @torch.inference_mode()
+    @torch._dynamo.disable()
     def forward(self, multimodal_params: List[MultimodalParams]) -> List[torch.Tensor]:
         mm_content_data, mm_extra_data = self._parse_and_batch_multimodal_data(multimodal_params)
         pixel_values = mm_content_data.get("pixel_values", None)
@@ -924,7 +925,8 @@ class Qwen3VLModelBase(PreTrainedModel):
 
         self.model_config = model_config
 
-        llm_model_config = copy.deepcopy(model_config)
+        mm_model_config = copy.deepcopy(model_config)
+        llm_model_config = model_config
         llm_model_config.pretrained_config = config.text_config
         if self.original_arch == "Qwen3VLForConditionalGeneration":
             llm_model_config.pretrained_config.architectures = ["Qwen3ForCausalLM"]
@@ -934,10 +936,10 @@ class Qwen3VLModelBase(PreTrainedModel):
             raise ValueError(f"Unsupported architecture: {self.original_arch}")
         # Qwen3ForCausalLM.
         self.llm = AutoModelForCausalLM.from_config(llm_model_config)
-
+        
         if not _is_disagg():
             self.mm_encoder = Qwen3VisionModelBase(
-                model_config, kwargs.get("vision_model_class", None)
+                mm_model_config, kwargs.get("vision_model_class", None)
             ).eval()
 
         self.use_deepstack = hasattr(config.vision_config, "deepstack_visual_indexes")
@@ -945,12 +947,13 @@ class Qwen3VLModelBase(PreTrainedModel):
             len(config.vision_config.deepstack_visual_indexes) if self.use_deepstack else 0
         )
 
-        self.post_config()
+        self.post_config(mm_model_config)
 
-    def post_config(self):
+    def post_config(self, mm_model_config):
         # use llm.config as config for pytorch model engine
         self.model_config.pretrained_config = self.llm.config
         self.config = self.model_config.pretrained_config
+        self.model_config.extra_attrs["vision_attn_layers"] = mm_model_config.extra_attrs["attn_layers"]
 
     def infer_max_seq_len(self) -> int:
         return self.llm.infer_max_seq_len()
@@ -980,7 +983,7 @@ class Qwen3VLModelBase(PreTrainedModel):
             device="cuda",
         )
 
-    @nvtx_range("Qwen3-VL prepare_mrope_config")
+    @torch._dynamo.disable()
     def prepare_mrope_config(
         self, multimodal_params: List[MultimodalParams], num_context_requests: int
     ):
@@ -989,25 +992,24 @@ class Qwen3VLModelBase(PreTrainedModel):
         mrope_position_deltas = []
         for multimodal_param in multimodal_params[:num_context_requests]:
             if multimodal_param.multimodal_data.get("mrope_config") is not None:
-                with nvtx_range("Qwen3-VL get_cos_sin"):
-                    if (
-                        multimodal_param.multimodal_data["mrope_config"].get("mrope_position_ids")
-                        is not None
-                    ):
-                        mrope_position_ids = multimodal_param.multimodal_data["mrope_config"][
-                            "mrope_position_ids"
-                        ]
+                if (
+                    multimodal_param.multimodal_data["mrope_config"].get("mrope_position_ids")
+                    is not None
+                ):
+                    mrope_position_ids = multimodal_param.multimodal_data["mrope_config"][
+                        "mrope_position_ids"
+                    ]
 
-                        self.mrope_position_ids_padding_cuda[
-                            :, :, : mrope_position_ids.shape[-1]
-                        ] = mrope_position_ids
-                        self.mrope_position_ids_padding_cuda[
-                            :, :, mrope_position_ids.shape[-1] :
-                        ] = 0
-                        cos, sin = self.rotary_emb.get_cos_sin(self.mrope_position_ids_padding_cuda)
-                        concat_cos_sin = torch.stack((cos, sin), dim=-1)
-                        concat_cos_sin = concat_cos_sin.reshape(concat_cos_sin.shape[0], -1)
-                        mrope_rotary_cos_sin.append(concat_cos_sin)
+                    self.mrope_position_ids_padding_cuda[
+                        :, :, : mrope_position_ids.shape[-1]
+                    ] = mrope_position_ids
+                    self.mrope_position_ids_padding_cuda[
+                        :, :, mrope_position_ids.shape[-1] :
+                    ] = 0
+                    cos, sin = self.rotary_emb.get_cos_sin(self.mrope_position_ids_padding_cuda)
+                    concat_cos_sin = torch.stack((cos, sin), dim=-1)
+                    concat_cos_sin = concat_cos_sin.reshape(concat_cos_sin.shape[0], -1)
+                    mrope_rotary_cos_sin.append(concat_cos_sin)
 
         for multimodal_param in multimodal_params[num_context_requests:]:
             if multimodal_param.multimodal_data.get("mrope_config") is not None:
@@ -1019,12 +1021,11 @@ class Qwen3VLModelBase(PreTrainedModel):
                         multimodal_param.multimodal_data["mrope_config"]["mrope_position_deltas"]
                     )
 
-        with nvtx_range("Qwen3-VL concat mrope_rotary_cos_sin"):
-            if mrope_rotary_cos_sin:
-                mrope_config["mrope_rotary_cos_sin"] = torch.cat(mrope_rotary_cos_sin, dim=0)
-        with nvtx_range("Qwen3-VL concat mrope_position_deltas"):
-            if mrope_position_deltas:
-                mrope_config["mrope_position_deltas"] = torch.cat(mrope_position_deltas, dim=0)
+        
+        if mrope_rotary_cos_sin:
+            mrope_config["mrope_rotary_cos_sin"] = torch.cat(mrope_rotary_cos_sin, dim=0)
+        if mrope_position_deltas:
+            mrope_config["mrope_position_deltas"] = torch.cat(mrope_position_deltas, dim=0)
 
         return mrope_config
 
@@ -1050,10 +1051,6 @@ class Qwen3VLModelBase(PreTrainedModel):
             attn_metadata.num_contexts,
             attn_metadata.num_generations,
         )
-        logger.debug(
-            f"num_context_requests: {num_context_requests}, num_generation_requests: {num_generation_requests}"
-        )
-
         multimodal_params = kwargs.get("multimodal_params", [])
         mm_embeds = []
         mrope_config = {}
@@ -1107,7 +1104,6 @@ class Qwen3VLModelBase(PreTrainedModel):
             deepstack_embeds=deepstack_embeds,
             mrope_config=mrope_config,
         )
-        logger.debug(f"output shape: {output_prob.shape}")
         return output_prob
 
     def _get_requests_with_mm_data(self, multimodal_params):

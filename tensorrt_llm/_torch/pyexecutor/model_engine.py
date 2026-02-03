@@ -594,7 +594,6 @@ class PyTorchModelEngine(ModelEngine):
                 f"[ModelEngine::warmup] Skipping warmup for cp_type: {None if cp_type is None else cp_type.name}."
             )
             return
-
         self._run_torch_compile_warmup(resource_manager)
         self._run_autotuner_warmup(resource_manager)
         self._run_cuda_graph_warmup(resource_manager)
@@ -703,8 +702,13 @@ class PyTorchModelEngine(ModelEngine):
         if not (self.cuda_graph_runner.enabled
                 or self._torch_compile_piecewise_cuda_graph):
             return
-
+        logger.info(
+            "[Cudagraph] capture generation cuda graph..."
+        )
         self._capture_generation_cuda_graphs(resource_manager)
+        logger.info(
+            "[Cudagraph] capture piecewise cuda graph..."
+        )
         self._capture_piecewise_cuda_graphs(resource_manager)
 
     def _capture_generation_cuda_graphs(self,
@@ -1892,7 +1896,8 @@ class PyTorchModelEngine(ModelEngine):
             inputs['spec_metadata'] = spec_metadata
 
         return inputs, self.gather_ids_cuda[:num_generation_tokens]
-
+    
+    @torch._dynamo.disable()
     def _prepare_tp_inputs(
             self,
             scheduled_requests: ScheduledRequests,
@@ -2538,12 +2543,13 @@ class PyTorchModelEngine(ModelEngine):
             # `_create_dummy_context_requests` from `kv_cache_creater` makes an exception that I can not add multimodal_data to the dummy_request
             # so that we only replace position_ids with mrope_position_ids when it is not a dummy request and for models who is using mrope.
             mrope_position_ids = torch.cat(mrope_position_ids, dim=-1)
+            total_num_mtokens = mrope_position_ids.shape[-1]
+            # assert mrope_position_ids.shape[-1] >= total_num_tokens
             if mrope_position_ids.device.type == "cpu":
                 mrope_position_ids = mrope_position_ids.pin_memory()
-            self.mrope_position_ids_cuda[:, :, :total_num_tokens].copy_(
-                mrope_position_ids[:, :, :total_num_tokens], non_blocking=True)
-            final_position_ids = self.mrope_position_ids_cuda[:, :, :
-                                                              total_num_tokens]
+            self.mrope_position_ids_cuda[:, :, :total_num_mtokens].copy_(
+                mrope_position_ids[:, :, :total_num_mtokens], non_blocking=True)
+            final_position_ids = self.mrope_position_ids_cuda[:, :, :total_num_tokens]
         else:
             position_ids = torch.tensor(position_ids,
                                         dtype=torch.int,

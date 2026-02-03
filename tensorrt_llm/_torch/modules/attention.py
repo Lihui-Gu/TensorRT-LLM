@@ -40,7 +40,7 @@ except ImportError:
 
 
 def extract_extra_attrs(layer_idx: str, attn_type: str):
-    assert attn_type in ["mla", "attn"], "Invalid attention type"
+    assert attn_type in ["mla", "attn", "vision_attn"], "Invalid attention type"
     extra_attrs = get_model_extra_attrs()
     assert extra_attrs is not None, "Model extra attrs is not set"
 
@@ -71,7 +71,7 @@ def extract_extra_attrs(layer_idx: str, attn_type: str):
         assert isinstance(
             attn_layer,
             MLA), "MLA layer must be a subclass of MLA or an instance of MLA"
-    elif attn_type == "attn":
+    elif attn_type == "attn" or attn_type == "vision_attn":
         assert isinstance(
             attn_layer, Attention
         ), "Attention layer must be a subclass of Attention or an instance of Attention"
@@ -80,8 +80,8 @@ def extract_extra_attrs(layer_idx: str, attn_type: str):
 
 
 def create_attn_outputs_impl(q: torch.Tensor, attention_mask: str,
-                             layer_idx: str) -> List[torch.Tensor]:
-    metadata, attn_layer = extract_extra_attrs(layer_idx, "attn")
+                             layer_idx: str, attn_type: str = "attn") -> List[torch.Tensor]:
+    metadata, attn_layer = extract_extra_attrs(layer_idx, attn_type)
     return attn_layer.create_output(q, metadata, attention_mask)
 
 
@@ -109,10 +109,11 @@ def attn_custom_op_inplace(
     attention_mask_data: Optional[torch.Tensor],
     attention_sinks: Optional[torch.Tensor],
     layer_idx: str,
+    attn_type: str,
     output: torch.Tensor,
     output_sf: Optional[torch.Tensor],
 ) -> None:
-    metadata, attn_layer = extract_extra_attrs(layer_idx, "attn")
+    metadata, attn_layer = extract_extra_attrs(layer_idx, attn_type)
     mask = PredefinedAttentionMask(
         attention_mask
     ) if attention_mask != CustomAttentionMask.CUSTOM else CustomAttentionMask(
@@ -145,6 +146,7 @@ class Attention(nn.Module):
         pos_embd_params: Optional[PositionalEmbeddingParams] = None,
         rope_fusion: Optional[bool] = None,
         layer_idx: Optional[int] = None,
+        attn_type: Optional[str] = "attn", # "attn", "vision_attn", "mla"
         dtype: torch.dtype = None,
         dense_bias: Optional[bool] = None,
         config: Optional[ModelConfig] = None,
@@ -516,7 +518,7 @@ class Attention(nn.Module):
         use_custom_inplace_op = (self.register_to_config
                                  and (self.attn_backend == "TRTLLM"
                                       or self.attn_backend == "FLASHINFER")
-                                 and is_torch_compiling())
+                                 and is_torch_compiling() and self.attn_type != "vision_attn")
 
         if use_custom_inplace_op:
             outputs = create_attn_outputs(q, attention_mask, self.layer_idx_str)
@@ -534,6 +536,7 @@ class Attention(nn.Module):
                 attention_mask_data,
                 attention_sinks,
                 self.layer_idx_str,
+                self.attn_type,
                 output,
                 output_sf,
             )
