@@ -292,8 +292,8 @@ class PyTorchModelEngine(ModelEngine):
                         backend=self._torch_compile_backend,
                         fullgraph=torch_compile_fullgraph)
                 else:
-                    self.model = torch.compile(
-                        self.model,
+                    self.model.llm = torch.compile(
+                        self.model.llm,
                         backend=self._torch_compile_backend,
                         fullgraph=torch_compile_fullgraph)
                 torch._dynamo.config.cache_size_limit = 16

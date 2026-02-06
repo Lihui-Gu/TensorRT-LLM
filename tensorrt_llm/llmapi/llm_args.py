@@ -2756,7 +2756,7 @@ class TorchCompileConfig(StrictBaseModel):
 
     @staticmethod
     def _generate_capture_num_tokens() -> List[int]:
-        return [2**i for i in range(8)] + [i for i in range(256, 3073, 256)]
+        return [2**i for i in range(10)] + [i for i in range(1024, 32769, 1024)]
 
 
 class TorchLlmArgs(BaseLlmArgs):
